@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,19 @@ from .cost_of_capital import (
 from .dcf_engine_v2 import run_dcf_v2, DCFComputationError, ScenarioPreset
 
 logger = logging.getLogger(__name__)
+
+FUND_CACHE_TTL = int(os.environ.get("FUNDAMENTALS_CACHE_TTL", "900"))
+_FUNDAMENTALS_CACHE: Dict[str, Dict[str, pd.DataFrame]] = {}
+
+
+def _cache_enabled() -> bool:
+    if FUND_CACHE_TTL <= 0:
+        return False
+    if os.environ.get("ENABLE_FUNDAMENTALS_CACHE", "1") == "0":
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    return True
 
 
 def _build_yf_session():
@@ -71,6 +85,17 @@ def _get_yf_ticker(ticker: str) -> yf.Ticker:
     except Exception as exc:
         logger.warning("Custom session rejected for %s: %s; falling back to default session", ticker, exc)
         return yf.Ticker(ticker)
+
+
+_TICKER_RE = re.compile(r"^[A-Z0-9\.\-]+$")
+
+
+def _normalize_ticker(raw: str) -> str:
+    value = (raw or "").upper().strip()
+    value = value.strip("{}[]() ")
+    if not value or not _TICKER_RE.match(value):
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+    return value
 
 
 _QUOTE_SUMMARY_HEADERS = {
@@ -147,6 +172,36 @@ def _quote_summary_history_to_df(history: Optional[List[Dict[str, Any]]]) -> pd.
     df = df[sorted(df.columns, reverse=True)]
     df.index = [_normalize_statement_label(idx) for idx in df.index]
     return df
+
+
+def _cache_statements(ticker: str, frames: Dict[str, Optional[pd.DataFrame]]) -> None:
+    if not _cache_enabled():
+        return
+    try:
+        _FUNDAMENTALS_CACHE[ticker] = {
+            key: value.copy(deep=True) if isinstance(value, pd.DataFrame) else value
+            for key, value in frames.items()
+        }
+        _FUNDAMENTALS_CACHE[ticker]["timestamp"] = time.time()
+    except Exception:
+        logger.debug("Unable to cache statements for %s", ticker)
+
+
+def _get_cached_statements(ticker: str) -> Optional[Dict[str, Optional[pd.DataFrame]]]:
+    if not _cache_enabled():
+        return None
+    cached = _FUNDAMENTALS_CACHE.get(ticker)
+    if not cached:
+        return None
+    ts = cached.get("timestamp")
+    if ts is None or (time.time() - ts) > FUND_CACHE_TTL:
+        _FUNDAMENTALS_CACHE.pop(ticker, None)
+        return None
+    return {
+        key: value.copy(deep=True) if isinstance(value, pd.DataFrame) else value
+        for key, value in cached.items()
+        if key in {"financials", "cashflow", "balance"}
+    }
 
 
 def _normalize_statement_label(label: str) -> str:
@@ -662,14 +717,23 @@ async def root():
 
 @app.get("/api/company/{ticker}")
 async def get_company(request: Request, ticker: str):
+    ticker_clean = _normalize_ticker(ticker)
+    cached_frames = _get_cached_statements(ticker_clean)
+    financials = cached_frames.get("financials") if cached_frames else None
+    cashflow = cached_frames.get("cashflow") if cached_frames else None
+    balance = cached_frames.get("balance") if cached_frames else None
+
     try:
-        tk = _get_yf_ticker(ticker)
+        tk = _get_yf_ticker(ticker_clean)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid ticker")
 
-    financials = tk.financials
-    cashflow = tk.cashflow
-    balance = tk.balance_sheet
+    if financials is None:
+        financials = tk.financials
+    if cashflow is None:
+        cashflow = tk.cashflow
+    if balance is None:
+        balance = tk.balance_sheet
 
     missing_sections = []
     for name, frame in (
@@ -681,7 +745,7 @@ async def get_company(request: Request, ticker: str):
             missing_sections.append(name)
 
     if missing_sections:
-        fallback_frames = _fetch_financials_via_quote_summary(ticker, tk)
+        fallback_frames = _fetch_financials_via_quote_summary(ticker_clean, tk)
         if fallback_frames:
             if (financials is None or financials.empty) and not fallback_frames["financials"].empty:
                 financials = fallback_frames["financials"]
@@ -699,8 +763,17 @@ async def get_company(request: Request, ticker: str):
                 missing_sections.append(name)
 
     if missing_sections:
-        logger.warning("Ticker %s missing sections after fallback: %s", ticker, ",".join(missing_sections))
+        logger.warning("Ticker %s missing sections after fallback: %s", ticker_clean, ",".join(missing_sections))
         raise HTTPException(status_code=502, detail="Upstream data unavailable. Please retry later.")
+    if cached_frames is None:
+        _cache_statements(
+            ticker_clean,
+            {
+                "financials": financials,
+                "cashflow": cashflow,
+                "balance": balance,
+            },
+        )
 
     revenue_series = get_row(financials, "Total Revenue")
     ebit_series = get_ebit_series(financials)
@@ -984,7 +1057,7 @@ async def get_company(request: Request, ticker: str):
                 }
 
     return {
-        "ticker": ticker.upper(),
+        "ticker": ticker_clean,
         "baseYear": base_year,
         "derived": derived,
         "fcfSeries": fcf_list,
