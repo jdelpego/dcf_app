@@ -104,14 +104,6 @@ def _normalize_ticker(raw: str) -> str:
     return value
 
 
-_QUOTE_SUMMARY_HEADERS = {
-    "User-Agent": random.choice([
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    ]),
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-}
 _QUOTE_SUMMARY_MODULES = ",".join(
     [
         "incomeStatementHistory",
@@ -134,10 +126,9 @@ def _get_quote_summary_session():
         session = curl_requests.Session()
     else:  # pragma: no cover - curl_cffi should be available via yfinance, but keep fallback
         session = requests.Session()
-        adapter = HTTPAdapter(max_retries=Retry(total=2, backoff_factor=0.3))
+        adapter = HTTPAdapter(max_retries=Retry(total=2, backoff_factor=1.5))
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-    session.headers.update(_QUOTE_SUMMARY_HEADERS)
     _QUOTE_SUMMARY_SESSION = session
     return session
 
@@ -232,6 +223,9 @@ def _normalize_statement_label(label: str) -> str:
 
 
 def _fetch_financials_via_quote_summary(ticker: str, ticker_obj: Optional[yf.Ticker] = None) -> Dict[str, pd.DataFrame]:
+    # Add small random delay to avoid hammering Yahoo
+    time.sleep(random.uniform(0.3, 0.8))
+    
     params = {
         "modules": _QUOTE_SUMMARY_MODULES,
         "lang": "en-US",
@@ -254,8 +248,22 @@ def _fetch_financials_via_quote_summary(ticker: str, ticker_obj: Optional[yf.Tic
     if payload is None:
         session = _get_quote_summary_session()
         url = _QUOTE_SUMMARY_URL.format(ticker=ticker)
+        
+        # Rotate user agent per request
+        headers = {
+            "User-Agent": random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+            ]),
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://finance.yahoo.com/",
+        }
+        
         try:
-            response = session.get(url, params=params, timeout=15)
+            response = session.get(url, params=params, headers=headers, timeout=15)
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:  # pragma: no cover - network
