@@ -50,43 +50,50 @@ def _cache_enabled() -> bool:
 
 
 def _build_yf_session():
-    # MUST use curl_cffi - it's the ONLY way to bypass Yahoo's bot detection
     if curl_requests is None:
-        raise RuntimeError("curl_cffi is required - Yahoo blocks standard requests")
+        raise RuntimeError("curl_cffi is required")
     
-    session = curl_requests.Session()
-    
-    # Aggressive anti-bot settings
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    # MOBILE USER AGENTS - Yahoo is more lenient with mobile traffic
+    mobile_agents = [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Mozilla/5.0 (iPad; CPU OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
     ]
+    
+    # Try to use impersonate parameter for perfect browser mimicry
+    try:
+        session = curl_requests.Session(impersonate="chrome110")
+    except:
+        session = curl_requests.Session()
+    
     session.headers.update({
-        "User-Agent": random.choice(user_agents),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        "User-Agent": random.choice(mobile_agents),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://finance.yahoo.com/",
+        "Origin": "https://finance.yahoo.com",
         "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
     })
     return session
 
 
 _YF_SESSION = None
+_LAST_REQUEST_TIME = 0
 
 
 def _get_yf_ticker(ticker: str) -> yf.Ticker:
-    """Create fresh session per ticker to avoid rate limit accumulation."""
-    global _YF_SESSION
-    # Recreate session every time to get fresh headers/user agent
+    global _YF_SESSION, _LAST_REQUEST_TIME
+    
+    # Enforce minimum 2 second gap between requests
+    elapsed = time.time() - _LAST_REQUEST_TIME
+    if elapsed < 2.0:
+        time.sleep(2.0 - elapsed + random.uniform(0.2, 0.5))
+    
+    # Fresh session every time
     _YF_SESSION = _build_yf_session()
-    time.sleep(random.uniform(0.5, 1.2))  # Critical delay before each ticker
+    _LAST_REQUEST_TIME = time.time()
+    
     return yf.Ticker(ticker, session=_YF_SESSION)
 
 
@@ -116,17 +123,17 @@ _QUOTE_SUMMARY_SESSION = None
 
 
 def _get_quote_summary_session():
-    global _QUOTE_SUMMARY_SESSION
-    if _QUOTE_SUMMARY_SESSION is not None:
-        return _QUOTE_SUMMARY_SESSION
+    # Always create fresh session with mobile headers
     if curl_requests is not None:
-        session = curl_requests.Session()
-    else:  # pragma: no cover - curl_cffi should be available via yfinance, but keep fallback
+        try:
+            session = curl_requests.Session(impersonate="chrome110")
+        except:
+            session = curl_requests.Session()
+    else:
         session = requests.Session()
-        adapter = HTTPAdapter(max_retries=Retry(total=2, backoff_factor=1.5))
+        adapter = HTTPAdapter(max_retries=Retry(total=2, backoff_factor=2.0))
         session.mount("https://", adapter)
         session.mount("http://", adapter)
-    _QUOTE_SUMMARY_SESSION = session
     return session
 
 
@@ -220,8 +227,7 @@ def _normalize_statement_label(label: str) -> str:
 
 
 def _fetch_financials_via_quote_summary(ticker: str, ticker_obj: Optional[yf.Ticker] = None) -> Dict[str, pd.DataFrame]:
-    # Add small random delay to avoid hammering Yahoo
-    time.sleep(random.uniform(0.3, 0.8))
+    time.sleep(random.uniform(1.0, 2.0))  # Longer delay
     
     params = {
         "modules": _QUOTE_SUMMARY_MODULES,
@@ -246,17 +252,17 @@ def _fetch_financials_via_quote_summary(ticker: str, ticker_obj: Optional[yf.Tic
         session = _get_quote_summary_session()
         url = _QUOTE_SUMMARY_URL.format(ticker=ticker)
         
-        # Rotate user agent per request
+        # MOBILE headers - less aggressive rate limiting
         headers = {
             "User-Agent": random.choice([
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+                "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+                "Mozilla/5.0 (iPad; CPU OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
             ]),
-            "Accept": "application/json",
+            "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://finance.yahoo.com/",
+            "Origin": "https://finance.yahoo.com",
         }
         
         try:
