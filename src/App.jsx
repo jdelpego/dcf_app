@@ -7,7 +7,7 @@ import { SensitivityGrid } from './components/SensitivityGrid'
 import { NarrativeSection } from './components/NarrativeSection'
 import { BackendDcfV2Card } from './components/BackendDcfV2Card'
 
-const API_BASE = import.meta.env.VITE_API_BASE || "https://dcf-backend-3yq2.onrender.com/";
+const API_BASE = import.meta.env.VITE_API_BASE || "https://dcf-app-5cli.onrender.com";
 
 const buildApiUrl = (path) => `${API_BASE}${path}`
 
