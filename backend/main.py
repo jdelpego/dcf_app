@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import time
+import random
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,13 +54,21 @@ def _build_yf_session():
     # requests.Session when curl_cffi isn't available (tests, minimal envs).
     session_cls = curl_requests.Session if curl_requests is not None else requests.Session
     session = session_cls()
+    
+    # ROTATE USER AGENTS - critical for shared IPs
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+    ]
     session.headers.update(
-        {"User-Agent": "Mozilla/5.0"}
+        {"User-Agent": random.choice(user_agents)}
     )
     if session_cls is requests.Session:
         retry = Retry(
             total=3,
-            backoff_factor=0.5,
+            backoff_factor=1.5,  # INCREASE backoff from 0.5 to 1.5
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=frozenset(["GET", "POST"]),
         )
@@ -96,7 +105,10 @@ def _normalize_ticker(raw: str) -> str:
 
 
 _QUOTE_SUMMARY_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "User-Agent": random.choice([
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    ]),
     "Accept": "application/json",
     "Accept-Language": "en-US,en;q=0.9",
 }
