@@ -50,47 +50,44 @@ def _cache_enabled() -> bool:
 
 
 def _build_yf_session():
-    # Use curl_cffi by default because Yahoo now requires it. Only fall back to
-    # requests.Session when curl_cffi isn't available (tests, minimal envs).
-    session_cls = curl_requests.Session if curl_requests is not None else requests.Session
-    session = session_cls()
+    # MUST use curl_cffi - it's the ONLY way to bypass Yahoo's bot detection
+    if curl_requests is None:
+        raise RuntimeError("curl_cffi is required - Yahoo blocks standard requests")
     
-    # ROTATE USER AGENTS - critical for shared IPs
+    session = curl_requests.Session()
+    
+    # Aggressive anti-bot settings
     user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     ]
-    session.headers.update(
-        {"User-Agent": random.choice(user_agents)}
-    )
-    if session_cls is requests.Session:
-        retry = Retry(
-            total=3,
-            backoff_factor=1.5,  # INCREASE backoff from 0.5 to 1.5
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=frozenset(["GET", "POST"]),
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
+    session.headers.update({
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+    })
     return session
 
 
-_YF_SESSION = _build_yf_session()
+_YF_SESSION = None
 
 
 def _get_yf_ticker(ticker: str) -> yf.Ticker:
-    """
-    Prefer our hardened session but fall back to yfinance defaults when Yahoo
-    rejects custom clients (the curl_cffi requirement introduced in late 2024).
-    """
-    try:
-        return yf.Ticker(ticker, session=_YF_SESSION)
-    except Exception as exc:
-        logger.warning("Custom session rejected for %s: %s; falling back to default session", ticker, exc)
-        return yf.Ticker(ticker)
+    """Create fresh session per ticker to avoid rate limit accumulation."""
+    global _YF_SESSION
+    # Recreate session every time to get fresh headers/user agent
+    _YF_SESSION = _build_yf_session()
+    time.sleep(random.uniform(0.5, 1.2))  # Critical delay before each ticker
+    return yf.Ticker(ticker, session=_YF_SESSION)
 
 
 _TICKER_RE = re.compile(r"^[A-Z0-9\.\-]+$")
